@@ -104,10 +104,13 @@ static std::string ns_error_string(NSError * error)
   if (!error)
     return "unknown IOUSBHost error";
   NSString * text = [error localizedDescription];
+  NSString * domain = [error domain];
+  NSString * reason = [error localizedFailureReason];
   char code[40];
   snprintf(code, sizeof(code), " (0x%08x)", (unsigned)[error code]);
   return (text ? std::string([text UTF8String]) : "unknown IOUSBHost error")
-    + code;
+    + code + (domain ? std::string(" [") + [domain UTF8String] + "]" : "")
+    + (reason ? std::string(": ") + [reason UTF8String] : "");
 }
 
 // The framework is weakly linked so normal ATA/NVMe access still works on
@@ -346,6 +349,19 @@ static void get_whole_disk_names(io_service_t device,
   while ((service = IOIteratorNext(iterator))) {
     if (IOObjectConformsTo(service, kIOMediaClass)
         && get_registry_boolean(service, kIOMediaWholeKey)) {
+      // APFS adds a synthetic Whole IOMedia below the physical disk. Only
+      // driver-backed media identify USB LUNs; counting containers as well
+      // would reject a single physical disk as a multi-disk device.
+      io_registry_entry_t parent = MACH_PORT_NULL;
+      const bool physical = IORegistryEntryGetParentEntry(service,
+        kIOServicePlane, &parent) == KERN_SUCCESS
+        && IOObjectConformsTo(parent, "IOBlockStorageDriver");
+      if (parent)
+        IOObjectRelease(parent);
+      if (!physical) {
+        IOObjectRelease(service);
+        continue;
+      }
       std::string name = get_registry_string(service, kIOBSDNameKey);
       if (!name.empty())
         unique_names.insert(std::string("/dev/") + name);
@@ -928,9 +944,27 @@ static bool copy_bot_pipes(IOUSBHostInterface * interface,
     return false;
   }
 
-  const IOUSBEndpointDescriptor * endpoint = 0;
-  while ((endpoint = IOUSBGetNextEndpointDescriptor(configuration,
-      interface_descriptor, (const IOUSBDescriptorHeader *)endpoint))) {
+  // Use the same explicit alternate boundary as UASP, checking descriptor
+  // lengths before reading endpoint fields. The endpoint-specific helper can
+  // return a truncated descriptor without rejecting it.
+  const IOUSBDescriptorHeader * descriptor =
+    (const IOUSBDescriptorHeader *)interface_descriptor;
+  while ((descriptor = IOUSBGetNextDescriptor(configuration, descriptor))) {
+    if (descriptor->bDescriptorType == kUSBInterfaceDesc)
+      break;
+    if (descriptor->bDescriptorType != kUSBEndpointDesc)
+      continue;
+    if (descriptor->bLength < sizeof(IOUSBEndpointDescriptor)) {
+      if (bulk_in)
+        [bulk_in release];
+      if (bulk_out)
+        [bulk_out release];
+      bulk_in = bulk_out = nil;
+      error = "BOT endpoint descriptor is truncated";
+      return false;
+    }
+    const IOUSBEndpointDescriptor * endpoint =
+      (const IOUSBEndpointDescriptor *)descriptor;
     if ((endpoint->bmAttributes & kIOUSBEndpointDescriptorTransferType)
         != kIOUSBEndpointDescriptorTransferTypeBulk)
       continue;
