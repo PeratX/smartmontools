@@ -147,3 +147,59 @@ without streams, other bridge families, and other firmware versions need their
 own hardware acceptance. Write-capable commands,
 firmware updates, and arbitrary NVMe administration remain outside this transport's
 read-oriented command policy.
+
+### Additional Realtek / APFS field report
+
+On 2026-09-12, an Apple Silicon Mac running macOS 27.0 (Darwin 27), built with
+Xcode 27 beta 6, read two APFS-formatted NVMe drives in Ugreen Realtek
+`0bda:9210` USB 10 Gb/s enclosures:
+
+| NVMe drive | Firmware | Read transport | Result |
+| --- | --- | --- | --- |
+| Samsung SSD 970 PRO 512GB | 1B2QEXP7 | Explicit BOT, alternate 0 | Identify, SMART/Health and eight error-log entries requested; exit 8 preserved the drive's health warning |
+| WDC WDS500G1B0C-00S6U0 (SN500 500GB) | 201000WD | Explicit BOT, alternate 0 | Identify, SMART/Health and eight error-log entries requested; exit 0 |
+
+These captures used `0acfcbcf3ce51321c9bc6fd41acca7d4d2de905a` plus local APFS
+physical-media filtering, explicit descriptor traversal, and a temporary BOT
+selector. They predate the current transport-suffix/reselection implementation.
+This report is historical hardware evidence, not hardware acceptance of the
+rebased patch. Both disks use the same bridge family; it does not establish
+cross-bridge compatibility. No populated error-log records were returned, and
+the lifetime error counter must not be treated as a count of readable records.
+Requests were limited to eight entries because the Realtek SNT Get Log path is
+limited to 512 bytes.
+
+IORegistry exposed both the physical whole IOMedia (parent conforming to
+`IOBlockStorageDriver`) and an APFS synthetic whole IOMedia (parent
+`AppleAPFSContainerScheme`) under one USB device. Counting both caused the
+single-disk guard to reject the device before capture. Filtering for the
+driver-backed whole media retains the guard against multiple physical disks.
+
+With the patch rebased onto `f88f05723154b4825405226bd56ea00c6761716b`, a
+non-capturing IORegistry comparison on the same host found two whole media per
+enclosure with the upstream function and one physical medium with the patched
+function. The patched `smartctl --scan -d usb` listed both external devices.
+The build and `make check` passed, including all three library test programs.
+These checks did not capture, unmount or issue SMART commands to either disk.
+
+The local runner verified the target volume was idle, unmounted without force,
+and restored it by UUID after device re-enumeration. Both volumes were verified
+mounted again, with macOS back on UASP (`0x62`) at 10 Gb/s. This establishes the
+runner-assisted recovery result, not standalone mount-restoration acceptance
+for the latest backend. No files were written by the SMART commands and no
+self-test was started. Raw logs, serial numbers, volume UUIDs and host paths
+are intentionally omitted from this report.
+
+On the earlier build, the associated-descriptor helper returned no UASP
+descriptors, while explicit traversal found all four pipe usages; Identify
+still timed out through UASP. BOT succeeded after explicit selection and
+endpoint traversal. The newer upstream alternate-reselection changes have
+not been retested on these enclosures, so the earlier timeout is not a claim
+that current UASP remains broken.
+
+Opening the interface also depended on launch context. An AppleScript
+privileged helper had no logged-in audit user and failed removable-volume
+privacy-service forwarding; a logged-in Terminal with standard `sudo` and
+the normal privacy prompt succeeded. Error domain and failure reason are
+retained alongside the hexadecimal code to make such failures diagnosable.
+No SIP, TCC database, entitlement, driver or firmware modification was used.

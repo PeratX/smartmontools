@@ -211,6 +211,16 @@ int main()
   using namespace smartmon;
   using namespace smartmon::os_darwin;
   @autoreleasepool {
+    CHECK(ns_error_string(nil) == "unknown IOUSBHost error");
+    NSError * detailedError = [NSError errorWithDomain:@"test.usb" code:5
+      userInfo:@{NSLocalizedDescriptionKey: @"Open failed",
+        NSLocalizedFailureReasonErrorKey: @"Interface unavailable"}];
+    CHECK(ns_error_string(detailedError)
+      == "Open failed (0x00000005) [test.usb]: Interface unavailable");
+    NSError * briefError = [NSError errorWithDomain:@"test.usb" code:5
+      userInfo:@{NSLocalizedDescriptionKey: @"Open failed"}];
+    CHECK(ns_error_string(briefError) == "Open failed (0x00000005) [test.usb]");
+
     // Actual JMS583 SuperSpeed descriptors: pipe usages follow companions.
     TestUSBInterface * descriptorInterface = [[TestUSBInterface alloc] init];
     descriptorInterface->descriptors = {
@@ -225,6 +235,28 @@ int main()
       7,5,4,2,0,4,0, 6,0x30,15,5,0,0, 4,0x24,4,0
     };
     descriptorInterface->interfaceOffset = 9; // Capture has reverted to BOT.
+    IOUSBHostPipe * bulkIn, * bulkOut;
+    std::string botDescriptorError;
+    auto copyBOTPipes = [&]() {
+      return copy_bot_pipes((IOUSBHostInterface *)descriptorInterface,
+        bulkIn, bulkOut, botDescriptorError);
+    };
+    CHECK(copyBOTPipes());
+    // Skip SuperSpeed companions and do not open the next alternate's pipes.
+    CHECK(descriptorInterface->addresses == (std::vector<uint8_t>{0x81,2}));
+    [bulkIn release];
+    [bulkOut release];
+    descriptorInterface->addresses.clear();
+    descriptorInterface->descriptors[34] = 3; // BOT OUT is now interrupt.
+    CHECK(!copyBOTPipes() && !bulkIn && !bulkOut);
+    CHECK(descriptorInterface->addresses == std::vector<uint8_t>{0x81});
+    descriptorInterface->addresses.clear();
+    descriptorInterface->descriptors[34] = 2;
+    descriptorInterface->descriptors[31] = 2; // Truncated second endpoint.
+    CHECK(!copyBOTPipes() && !bulkIn && !bulkOut);
+    CHECK(botDescriptorError == "BOT endpoint descriptor is truncated");
+    descriptorInterface->descriptors[31] = 7;
+    descriptorInterface->addresses.clear();
     darwin_usb_transport selected = darwin_usb_transport_none;
     std::string selectionError;
     CHECK(select_protocol((IOUSBHostInterface *)descriptorInterface, 0,
